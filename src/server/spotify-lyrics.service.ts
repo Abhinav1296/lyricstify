@@ -11,7 +11,6 @@ type TrackInfo = {
 type SearchSuccess = { status: 'success'; track: TrackInfo };
 type SearchNotFound = { status: 'not_found'; error: { message: string; details?: string } };
 type SearchError = { status: 'error'; error: { message: string; details?: string } };
-
 type SearchResult = SearchSuccess | SearchNotFound | SearchError;
 
 type LyricsSuccess = {
@@ -25,36 +24,22 @@ type LyricsSuccess = {
   };
 };
 
-type LyricsNotFound = {
-  status: 'not_found';
-  error: { message: string; details?: string };
-  track?: TrackInfo;
-};
-
-type LyricsError = {
-  status: 'error';
-  error: { message: string; details?: string };
-  track?: TrackInfo;
-};
+type LyricsNotFound = { status: 'not_found'; error: { message: string; details?: string }; track?: TrackInfo };
+type LyricsError = { status: 'error'; error: { message: string; details?: string }; track?: TrackInfo };
 
 export class SpotifyLyricsService {
   private token: { accessToken: string; expiresAtMs: number } | null = null;
-
   private readonly lyricstifyBase = 'https://api.lyricstify.vercel.app/v1/lyrics';
 
   private getCookie(): string {
     const cookie = process.env.SPOTIFY_COOKIE || '';
-    if (!cookie.trim()) {
-      throw new Error('SPOTIFY_COOKIE not set');
-    }
+    if (!cookie.trim()) throw new Error('SPOTIFY_COOKIE not set');
     return cookie;
   }
 
   private async getAccessToken(): Promise<string> {
     const now = Date.now();
-    if (this.token && this.token.expiresAtMs - now > 60_000) {
-      return this.token.accessToken;
-    }
+    if (this.token && this.token.expiresAtMs - now > 60_000) return this.token.accessToken;
 
     const url =
       'https://open.spotify.com/get_access_token?reason=transport&productType=web_player';
@@ -64,13 +49,16 @@ export class SpotifyLyricsService {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
         Accept: 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9',
+        Referer: 'https://open.spotify.com/',
+        Origin: 'https://open.spotify.com',
         Cookie: this.getCookie(),
       },
     });
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      throw new Error(`spotify token failed: ${resp.status} ${text}`);
+      throw new Error(`spotify token failed: ${resp.status} ${text.slice(0, 200)}`);
     }
 
     const data: any = await resp.json();
@@ -84,7 +72,12 @@ export class SpotifyLyricsService {
   }
 
   async searchTrack(input: ResolveInput): Promise<SearchResult> {
-    const token = await this.getAccessToken();
+    let token: string;
+    try {
+      token = await this.getAccessToken();
+    } catch (e: any) {
+      return { status: 'error', error: { message: 'spotify token error', details: String(e?.message || e) } };
+    }
 
     const q = `track:${input.song} artist:${input.artist}`;
     const url = new URL('https://api.spotify.com/v1/search');
@@ -94,26 +87,17 @@ export class SpotifyLyricsService {
     url.searchParams.set('market', input.market);
 
     const resp = await fetch(url.toString(), {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/json',
-      },
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
     });
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      return {
-        status: 'error',
-        error: { message: 'spotify search failed', details: `${resp.status} ${text}` },
-      };
+      return { status: 'error', error: { message: 'spotify search failed', details: `${resp.status} ${text.slice(0, 200)}` } };
     }
 
     const data: any = await resp.json();
     const item = data?.tracks?.items?.[0];
-
-    if (!item?.id) {
-      return { status: 'not_found', error: { message: 'track not found on spotify' } };
-    }
+    if (!item?.id) return { status: 'not_found', error: { message: 'track not found on spotify' } };
 
     return {
       status: 'success',
@@ -128,9 +112,6 @@ export class SpotifyLyricsService {
   }
 
   private normalizeLyricstifyResponse(raw: any) {
-    // Common shapes:
-    // { lyrics: { lines: [{ startTimeMs, words }], syncType } }
-    // or nested under data
     const lyrics = raw?.lyrics || raw?.data?.lyrics || raw?.data || raw;
 
     const syncType = lyrics?.syncType || 'UNSYNCED';
@@ -146,19 +127,12 @@ export class SpotifyLyricsService {
 
     const plain = synced.map((x) => x.text).join('\n').trim();
 
-    return {
-      syncType,
-      synced,
-      plain: plain || null,
-      hasTimestamps: synced.length > 0 && syncType !== 'UNSYNCED',
-    };
+    return { syncType, synced, plain: plain || null, hasTimestamps: synced.length > 0 && syncType !== 'UNSYNCED' };
   }
 
   async resolveLyrics(input: ResolveInput): Promise<LyricsSuccess | LyricsNotFound | LyricsError> {
     const search = await this.searchTrack(input);
-    if (search.status !== 'success') {
-      return search; // TS now understands this union
-    }
+    if (search.status !== 'success') return search;
 
     const trackId = search.track.id;
 
@@ -168,22 +142,14 @@ export class SpotifyLyricsService {
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      return {
-        status: 'not_found',
-        error: { message: 'lyrics not found', details: `${resp.status} ${text}` },
-        track: search.track,
-      };
+      return { status: 'not_found', error: { message: 'lyrics not found', details: `${resp.status} ${text.slice(0, 200)}` }, track: search.track };
     }
 
     const raw = await resp.json();
     const normalized = this.normalizeLyricstifyResponse(raw);
 
     if (!normalized.plain && normalized.synced.length === 0) {
-      return {
-        status: 'not_found',
-        error: { message: 'lyrics empty' },
-        track: search.track,
-      };
+      return { status: 'not_found', error: { message: 'lyrics empty' }, track: search.track };
     }
 
     return {
