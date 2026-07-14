@@ -1,12 +1,44 @@
 type ResolveInput = { artist: string; song: string; market: string };
 
-type SpotifyToken = {
-  accessToken: string;
-  expiresAtMs: number;
+type TrackInfo = {
+  id: string;
+  name: string;
+  artists: string[];
+  album: string | null;
+  artwork: string | null;
+};
+
+type SearchSuccess = { status: 'success'; track: TrackInfo };
+type SearchNotFound = { status: 'not_found'; error: { message: string; details?: string } };
+type SearchError = { status: 'error'; error: { message: string; details?: string } };
+
+type SearchResult = SearchSuccess | SearchNotFound | SearchError;
+
+type LyricsSuccess = {
+  status: 'success';
+  track: TrackInfo;
+  lyrics: {
+    syncType: string;
+    hasTimestamps: boolean;
+    synced: { timeMs: number; text: string }[];
+    plain: string | null;
+  };
+};
+
+type LyricsNotFound = {
+  status: 'not_found';
+  error: { message: string; details?: string };
+  track?: TrackInfo;
+};
+
+type LyricsError = {
+  status: 'error';
+  error: { message: string; details?: string };
+  track?: TrackInfo;
 };
 
 export class SpotifyLyricsService {
-  private token: SpotifyToken | null = null;
+  private token: { accessToken: string; expiresAtMs: number } | null = null;
 
   private readonly lyricstifyBase = 'https://api.lyricstify.vercel.app/v1/lyrics';
 
@@ -24,7 +56,6 @@ export class SpotifyLyricsService {
       return this.token.accessToken;
     }
 
-    // Spotify web token endpoint
     const url =
       'https://open.spotify.com/get_access_token?reason=transport&productType=web_player';
 
@@ -43,8 +74,8 @@ export class SpotifyLyricsService {
     }
 
     const data: any = await resp.json();
-    const accessToken: string = data?.accessToken;
-    const exp: number = data?.accessTokenExpirationTimestampMs;
+    const accessToken: string | undefined = data?.accessToken;
+    const exp: number | undefined = data?.accessTokenExpirationTimestampMs;
 
     if (!accessToken || !exp) throw new Error('spotify token response missing fields');
 
@@ -52,7 +83,7 @@ export class SpotifyLyricsService {
     return accessToken;
   }
 
-  async searchTrack(input: ResolveInput) {
+  async searchTrack(input: ResolveInput): Promise<SearchResult> {
     const token = await this.getAccessToken();
 
     const q = `track:${input.song} artist:${input.artist}`;
@@ -97,47 +128,46 @@ export class SpotifyLyricsService {
   }
 
   private normalizeLyricstifyResponse(raw: any) {
-    // Lyricstify response typically: { lyrics: { lines: [{ startTimeMs, words }], syncType } }
+    // Common shapes:
+    // { lyrics: { lines: [{ startTimeMs, words }], syncType } }
+    // or nested under data
     const lyrics = raw?.lyrics || raw?.data?.lyrics || raw?.data || raw;
 
     const syncType = lyrics?.syncType || 'UNSYNCED';
     const lines = Array.isArray(lyrics?.lines) ? lyrics.lines : [];
 
-    const timed = lines
+    const synced = lines
       .map((l: any) => {
         const t = Number(l?.startTimeMs ?? l?.startTime ?? l?.timeMs ?? 0);
         const text = String(l?.words ?? l?.text ?? '').trim();
         return text ? { timeMs: t, text } : null;
       })
-      .filter(Boolean);
+      .filter(Boolean) as { timeMs: number; text: string }[];
 
-    const plain = timed.map((x: any) => x.text).join('\n').trim();
+    const plain = synced.map((x) => x.text).join('\n').trim();
 
     return {
       syncType,
-      timedLyrics: timed,
-      plainLyrics: plain || null,
-      hasTimestamps: timed.length > 0 && syncType !== 'UNSYNCED',
+      synced,
+      plain: plain || null,
+      hasTimestamps: synced.length > 0 && syncType !== 'UNSYNCED',
     };
   }
 
-  async resolveLyrics(input: ResolveInput) {
-    // 1) spotify search -> trackId
+  async resolveLyrics(input: ResolveInput): Promise<LyricsSuccess | LyricsNotFound | LyricsError> {
     const search = await this.searchTrack(input);
     if (search.status !== 'success') {
-      return search;
+      return search; // TS now understands this union
     }
 
     const trackId = search.track.id;
 
-    // 2) lyricstify lyrics by trackId (time-synced)
     const resp = await fetch(`${this.lyricstifyBase}/${trackId}`, {
       headers: { Accept: 'application/json' },
     });
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      // treat as not found, not 500
       return {
         status: 'not_found',
         error: { message: 'lyrics not found', details: `${resp.status} ${text}` },
@@ -148,7 +178,7 @@ export class SpotifyLyricsService {
     const raw = await resp.json();
     const normalized = this.normalizeLyricstifyResponse(raw);
 
-    if (!normalized.plainLyrics && normalized.timedLyrics.length === 0) {
+    if (!normalized.plain && normalized.synced.length === 0) {
       return {
         status: 'not_found',
         error: { message: 'lyrics empty' },
@@ -162,9 +192,9 @@ export class SpotifyLyricsService {
       lyrics: {
         syncType: normalized.syncType,
         hasTimestamps: normalized.hasTimestamps,
-        synced: normalized.timedLyrics,   // [{timeMs,text}]
-        plain: normalized.plainLyrics
-      }
+        synced: normalized.synced,
+        plain: normalized.plain,
+      },
     };
   }
 }
