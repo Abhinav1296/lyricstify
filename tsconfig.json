@@ -2,19 +2,14 @@
   "compilerOptions": {
     "module": "CommonJS",
     "moduleResolution": "node",
-    "declaration": true,
-    "removeComments": true,
+    "target": "ES2019",
+    "outDir": "./dist",
+    "declaration": false,
+    "sourceMap": true,
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
-    "allowSyntheticDefaultImports": true,
-    "target": "ES2019",
-    "sourceMap": true,
-    "outDir": "./dist",
-    "baseUrl": "./",
-    "incremental": true,
-    "skipLibCheck": true,
-    "strict": true,
     "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true
+    "skipLibCheck": true,
+    "strict": false
   }
 }
